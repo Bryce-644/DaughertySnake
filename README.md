@@ -1,59 +1,118 @@
-# Battlesnake Python Starter Project
+# Battlesnake — "Daugherty"
 
-An official Battlesnake template written in Python. Get started at [play.battlesnake.com](https://play.battlesnake.com).
+Entry for the Vasion Battlesnake Funathon. Built on the official
+[Python starter](https://github.com/BattlesnakeOfficial/starter-snake-python);
+all decision logic is in `main.py`, and `server.py` is the starter's Flask shim,
+unmodified.
 
-![Battlesnake Logo](https://media.battlesnake.com/social/StarterSnakeGitHubRepos_Python.png)
+## Layout
 
-This project is a great starting point for anyone wanting to program their first Battlesnake in Python. It can be run locally or easily deployed to a cloud provider of your choosing. See the [Battlesnake API Docs](https://docs.battlesnake.com/api) for more detail. 
+| Path | What it is |
+| --- | --- |
+| `main.py` | The snake. Everything worth changing is here. |
+| `server.py` | Starter Flask shim — routes, binds `0.0.0.0`, honours `$PORT`. Don't edit. |
+| `play.ps1` | Runs local games and prints a summary. |
+| `tests\test_main.py` | Unit tests, including regressions for bugs found in self-play. |
+| `tools\battlesnake.exe` | Battlesnake CLI v1.2.3. |
+| `.venv\` | Python 3.12 virtualenv. |
 
-[![Run on Replit](https://repl.it/badge/github/BattlesnakeOfficial/starter-snake-python)](https://replit.com/@Battlesnake/starter-snake-python)
+Note: the `python` on PATH is a broken Microsoft Store stub. Always use
+`.\.venv\Scripts\python.exe`.
 
-## Technologies Used
+## Run it
 
-This project uses [Python 3](https://www.python.org/) and [Flask](https://flask.palletsprojects.com/). It also comes with an optional [Dockerfile](https://docs.docker.com/engine/reference/builder/) to help with deployment.
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests -q     # unit tests
+.\.venv\Scripts\python.exe main.py                # serve on :8000
 
-## Run Your Battlesnake
-
-Install dependencies using pip
-
-```sh
-pip install -r requirements.txt
+.\play.ps1                        # 10 solo games
+.\play.ps1 -Games 25 -Snakes 4    # 25 four-way self-play games
+.\play.ps1 -Games 1 -Browser      # one game, watched in the browser
 ```
 
-Start your Battlesnake
+`play.ps1` starts and stops the server itself. It flags any game ending by turn 3,
+which means a hard safety bug rather than bad luck.
 
-```sh
-python main.py
-```
+## How the snake decides
 
-You should see the following output once it is running
+Every candidate move is scored and the highest wins. Four layers:
 
-```sh
-Running your Battlesnake at http://0.0.0.0:8000
- * Serving Flask app 'My Battlesnake'
- * Debug mode: off
-```
+1. **Hard safety** — discard off-board squares and any square still occupied when
+   we arrive. Occupancy is *time-aware*: a segment `i` back from the head of an
+   `n`-long snake vacates in `n - i` turns, so the tail square is legal to enter.
+   This is what lets the snake chase its own tail down a one-wide corridor.
+2. **Space** — flood fill from each candidate using those same timers, with a
+   heavy penalty when reachable space is smaller than our own length. This is the
+   highest-value layer; it's what stops the snake boxing itself in.
+3. **Food** — BFS distance to nearest reachable food, weighted by health (urgent
+   below 30, moderate below 60) and bumped when we're the shortest snake.
+4. **Head to head** — squares a same-length-or-longer snake could also reach are
+   heavily penalised, counted per threat; squares only a *shorter* snake can reach
+   get a bonus, because we win that collision.
 
-Open [localhost:8000](http://localhost:8000) in your browser and you should see
+Two subtleties that cost real games in testing, both now covered by tests:
 
-```json
-{"apiversion":"1","author":"","color":"#888888","head":"default","tail":"default"}
-```
+- **Contested food is not a length advantage.** If the contested square is food,
+  the opponent eats it too and grows by the same 1, so the head-to-head
+  comparison uses raw lengths. Crediting ourselves a `+1` turned mutual kills
+  into phantom wins and produced 12 draws in 25 self-play games.
+- **Don't apply "might grow" pessimism to our own snake.** We know whether the
+  move being evaluated eats, so our own tail timing is exact. Being pessimistic
+  about it wrongly blocked our own tail square and, in tight spots, left only
+  fatal options.
 
-## Play a Game Locally
+No multi-turn lookahead. It risks the 500 ms move budget and is much harder to
+debug mid-tournament; revisit only if the snake is clearly outclassed.
 
-Install the [Battlesnake CLI](https://github.com/BattlesnakeOfficial/rules/tree/main/cli)
-* You can [download compiled binaries here](https://github.com/BattlesnakeOfficial/rules/releases)
-* or [install as a go package](https://github.com/BattlesnakeOfficial/rules/tree/main/cli#installation) (requires Go 1.18 or higher)
+## Measured performance
 
-Command to run a local game
+11×11, 25-game batches, Python 3.12 on this machine:
 
-```sh
-battlesnake play -W 11 -H 11 --name 'Python Starter Project' --url http://localhost:8000 -g solo --browser
-```
+| Scenario | Avg turns | Min | Worst ms/turn |
+| --- | --- | --- | --- |
+| Solo | ~640 | 322 | 15 |
+| 4-way self-play | ~115 | 30 | 37 |
 
-## Next Steps
+`ms/turn` covers every snake's HTTP round trip, so per-move cost is roughly a
+quarter of the four-snake figure — far inside the 500 ms budget.
 
-Continue with the [Battlesnake Quickstart Guide](https://docs.battlesnake.com/quickstart) to customize and improve your Battlesnake's behavior.
+## Tuning between rounds
 
-**Note:** To play games on [play.battlesnake.com](https://play.battlesnake.com) you'll need to deploy your Battlesnake to a live web server OR use a port forwarding tool like [ngrok](https://ngrok.com/) to access your server locally.
+The knobs are named constants at the top of `main.py`:
+
+| Constant | Raise it to... |
+| --- | --- |
+| `W_SPACE` | play more cautiously, value open board more |
+| `W_TRAP_BASE`, `W_TRAP_PER_CELL` | avoid pockets harder (more negative) |
+| `W_H2H_WIN` | hunt smaller snakes more aggressively |
+| `W_H2H_LOSS` | dodge bigger snakes harder (more negative) |
+| `HUNGRY_HEALTH`, `PECKISH_HEALTH` | start seeking food sooner |
+| `W_CENTER` | fight harder for centre control (more negative) |
+
+Change one at a time and re-run `.\play.ps1 -Games 25 -Snakes 4`; compare average
+turns. Always re-run the unit tests before publishing.
+
+## Deploy to Replit
+
+1. Open the starter as a Replit template via the **Run on Replit** badge on the
+   [starter repo](https://github.com/BattlesnakeOfficial/starter-snake-python).
+2. Replace the contents of `main.py` with this repo's `main.py`. Leave
+   `server.py` and `requirements.txt` alone — nothing else needs to change.
+3. Run, then **Publish**.
+
+Replit gotchas from the participant guide:
+
+- Changes don't show in the preview until you restart the service —
+  `Cmd+K` → "Restart compute".
+- Changes aren't live for tournaments until you **republish**.
+- Idle apps go to sleep. Hit the endpoint at least **5 minutes** before any
+  tournament, and check early if you haven't touched it since the day before.
+
+## Register
+
+On [battlesnake.com](https://battlesnake.com), create a snake pointing at the
+published Replit URL. The display name **must contain "Daugherty"** per the event
+rules. Verify by opening the URL in a browser — you should see the `info()` JSON.
+
+Set `author` in `main.py` to your battlesnake.com username if you want it to
+match; it's cosmetic and doesn't affect play.
